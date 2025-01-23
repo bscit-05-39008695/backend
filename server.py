@@ -1,202 +1,112 @@
-from flask import Flask, request, jsonify
-import psycopg2
-import bcrypt
+from flask import Flask, jsonify, request
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 from flask_cors import CORS
-from psycopg2 import pool
-import logging
-import os
-from datetime import datetime
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+import bcrypt
 
 # Initialize Flask app
 app = Flask(__name__)
 
-# Configure CORS with specific origins
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            "http://localhost:5173",  # Local development
-            "http://localhost:3000",
-            "https://noones-payment.vercel.app",  # Add your frontend URL
-            "*"  # Remove this in production
-        ],
-        "methods": ["POST", "OPTIONS", "GET"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Type"],
-        "supports_credentials": False,
-        "max_age": 120
-    }
-})
-
-# PostgreSQL connection setup
-db_params = {
-    'user': 'postgres.nzqybfjrmlsbrskzbyil',
-    'host': 'aws-0-ap-south-1.pooler.supabase.com',
-    'database': 'postgres',
-    'password': 'WMBqWdQO4TYIx8MM',
-    'port': 5432
+# Database configuration
+DB_CONFIG = {
+    "dbname": "postgres",
+    "user": "postgres.qanmiazixizmcjawwvlk",
+    "password": "Flaa1D9xs76i6cjY",
+    "host": "aws-0-ap-south-1.pooler.supabase.com",
+    "port": 5432
 }
 
-# Connection Pool Setup
-db_pool = None
+# SQLAlchemy database URI setup
+app.config['SQLALCHEMY_DATABASE_URI'] = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False  # Disable unnecessary track modifications
 
-def init_db_pool():
-    """Initialize the database connection pool with error handling"""
-    global db_pool
-    try:
-        if db_pool is None:
-            db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, **db_params)
-            logger.info('✅ Database connection pool initialized')
-            return True
-    except Exception as e:
-        logger.error(f'❌ Failed to initialize database pool: {str(e)}')
-        return False
+# Initialize CORS
+CORS(app)
 
-def test_db_connection():
-    """Test database connection and create tables if needed"""
-    try:
-        conn = db_pool.getconn()
-        cursor = conn.cursor()
-        
-        # Test connection
-        cursor.execute('SELECT NOW()')
-        current_time = cursor.fetchone()[0]
-        logger.info(f'✅ Database connected successfully at {current_time}')
+# Initialize SQLAlchemy and Migrate
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)  # Initialize migrations
 
-        # Create table if it doesn't exist
-        create_table_query = '''
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                email VARCHAR(255) NOT NULL,
-                password VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                ip_address VARCHAR(45),
-                user_agent VARCHAR(255)
-            );
-        '''
-        cursor.execute(create_table_query)
-        conn.commit()
-        logger.info('✅ Users table ready')
+# User Model
+class User(db.Model):
+    __tablename__ = 'users'
 
-    except Exception as err:
-        logger.error(f'❌ Database connection failed: {str(err)}')
-        raise
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            db_pool.putconn(conn)
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    email = db.Column(db.String(255), nullable=False, unique=True)
+    password = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
 
-# Initialize database pool and test connection
-if not init_db_pool():
-    logger.error("Failed to initialize application. Exiting.")
-    exit(1)
+    def __init__(self, email, password):
+        self.email = email
+        self.password = password
 
-test_db_connection()
+    def to_dict(self):
+        """Manually serialize User object to dictionary"""
+        return {"id": self.id, "email": self.email, "created_at": self.created_at}
 
+# Root Route
 @app.route('/')
 def root():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat()
-    })
+    return 'Server is running!'
 
+# Store user credentials (Hash password and save to DB)
 @app.route('/store-credentials', methods=['POST'])
 def store_credentials():
-    """Store user credentials endpoint with enhanced error handling and logging"""
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({
+            'error': 'Email and password are required',
+            'shouldNavigate': False
+        }), 400
+
     try:
-        data = request.get_json()
-        if not data:
-            logger.error("No JSON data received")
-            return jsonify({
-                'error': 'No data provided',
-                'shouldNavigate': False
-            }), 400
-
-        email = data.get('email')
-        password = data.get('password')
-
-        if not email or not password:
-            logger.error(f'Missing credentials - Email provided: {bool(email)}, Password provided: {bool(password)}')
-            return jsonify({
-                'error': 'Email and password are required',
-                'shouldNavigate': False
-            }), 400
-
-        # Get client information
-        ip_address = request.headers.get('X-Forwarded-For', request.remote_addr)
-        user_agent = request.headers.get('User-Agent', 'Unknown')
-
         # Hash the password
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-        conn = db_pool.getconn()
-        try:
-            cursor = conn.cursor()
-            # Insert user with additional information
-            insert_query = '''
-                INSERT INTO users (email, password, ip_address, user_agent)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id, email, created_at;
-            '''
-            cursor.execute(insert_query, (email, hashed_password, ip_address, user_agent))
-            user = cursor.fetchone()
-            conn.commit()
-            
-            logger.info(f'✅ User stored successfully: ID {user[0]}')
-            
-            return jsonify({
-                'success': True,
-                'message': 'User stored successfully',
-                'user': {
-                    'id': user[0],
-                    'email': user[1],
-                    'created_at': user[2].isoformat()
-                },
-                'shouldNavigate': True,
-                'navigateTo': '/verification'
-            }), 200
+        # Check if the user already exists
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
+            return jsonify({'error': f'User with email {email} already exists'}), 400
 
-        except psycopg2.Error as db_err:
-            conn.rollback()
-            logger.error(f'Database error: {str(db_err)}')
-            return jsonify({
-                'success': False,
-                'error': 'Database error occurred',
-                'details': str(db_err),
-                'shouldNavigate': False
-            }), 500
-        finally:
-            cursor.close()
-            db_pool.putconn(conn)
+        # Create a new user
+        user = User(email=email, password=hashed_password)
+        db.session.add(user)
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': 'User stored successfully',
+            'user': user.to_dict(),  # Manually serialize the user
+            'shouldNavigate': True,
+            'navigateTo': '/verification'  # or wherever you want to navigate
+        }), 200
 
     except Exception as err:
-        logger.error(f'Unexpected error: {str(err)}')
         return jsonify({
             'success': False,
-            'error': 'An unexpected error occurred',
+            'error': 'Error saving credentials',
             'details': str(err),
             'shouldNavigate': False
         }), 500
 
-# Global error handler
-@app.errorhandler(Exception)
-def handle_error(error):
-    logger.error(f"Unhandled error: {str(error)}", exc_info=True)
-    return jsonify({
-        'success': False,
-        'error': 'Internal server error',
-        'details': str(error),
-        'shouldNavigate': False
-    }), 500
+# Get all users
+@app.route("/users", methods=["GET"])
+def get_users():
+    users = User.query.all()
+    return jsonify([user.to_dict() for user in users])  # Manually serialize each user
+
+# Get a user by ID
+@app.route("/user/<int:id>", methods=["GET"])
+def get_user_by_id(id):
+    user = User.query.get(id)
+
+    if not user:
+        return jsonify({"error": f"User with id {id} not found"}), 400
+
+    return jsonify(user.to_dict())  # Manually serialize the user
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5020))
-    app.run(host='0.0.0.0', port=port)
+    app.run(debug=True)

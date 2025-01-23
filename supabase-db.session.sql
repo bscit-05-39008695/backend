@@ -5,4 +5,4 @@ CREATE TABLE IF NOT EXISTS users (
     password VARCHAR(255) NOT NULL
 );
 
-SELECT * FROM users;
+INSERT INTO users (email, password) VALUES ('J2QlS@example.com', 'password');
